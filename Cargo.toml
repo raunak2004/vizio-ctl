@@ -1,0 +1,18 @@
+[package]
+name = "vizio-ctl"
+version = "0.1.0"
+edition = "2021"
+description = "Unofficial CLI and local web UI for Vizio SmartCast soundbars"
+repository = "https://github.com/raunak2004/vizio-ctl"
+readme = "README.md"
+keywords = ["vizio", "smartcast", "soundbar", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+tiny_http = "0.12"
