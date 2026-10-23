@@ -26,7 +26,7 @@ Other Vizio soundbars and speakers that expose the same SmartCast API may work, 
 
 ### What has been verified
 
-Verified on the device above: `status`, `on`, `off`, `vol-up`, `vol-down`, `mute`, and setting bass.
+Verified on the device above: `status`, `on`, `off`, `vol-up`, `vol-down`, `mute`, and setting bass. The web UI has been confirmed to load from another device on the same network.
 
 Implemented but **not yet verified**: the other settings, input selection, the actions, the `info` command, and the web UI's newer controls. Reports and fixes are welcome (see [Contributing](#contributing)).
 
@@ -77,6 +77,7 @@ Run `vizio-ctl --help` or `vizio-ctl <command> --help` for details.
 | `bass`, `treble`, `balance [LEVEL]` | Show, or set, a level from -12 to 12 |
 | `set <name> [value]` | Show or set any setting (see below) |
 | `action <name>` | Run an action such as a speaker test |
+| `preset <music\|movie> [--save]` | Apply a sound preset, or save the current sound settings as it |
 | `info [--reveal]` | Show model, firmware and network information |
 | `serve` | Start the local web UI |
 
@@ -97,6 +98,23 @@ vizio-ctl --host 192.168.1.50 set subwoofer -2
 vizio-ctl --host 192.168.1.50 set input Optical
 ```
 
+### Presets
+
+Two presets, `music` and `movie`, apply a set of sound settings (EQ, surround sound, VRT-X, bass, treble, center, surround volume, subwoofer) in one step:
+
+```bash
+vizio-ctl --host 192.168.1.50 preset music
+vizio-ctl --host 192.168.1.50 preset movie
+```
+
+They start with built-in values, which are only a starting point; sound is subjective and room-dependent. To make a preset your own, set the soundbar the way you like it, then save it:
+
+```bash
+vizio-ctl --host 192.168.1.50 preset music --save
+```
+
+Saved presets are stored in a JSON file in your config folder (`presets.json` next to the tool's other config, for example under `~/Library/Application Support/vizio-ctl/` on macOS). The soundbar itself does not store them. The web UI has the same Music and Movie buttons, each with a "Save current" button.
+
 ### Actions
 
 `speaker-test-auto`, `speaker-test-left`, `speaker-test-center`, `speaker-test-right`, `speaker-test-left-surround`, `speaker-test-right-surround`, `speaker-test-subwoofer`, `input-auto-detect`, `bluetooth-pair`, `subwoofer-pair`, `check-update`, `power-cycle`.
@@ -115,7 +133,42 @@ vizio-ctl --host 192.168.1.50 serve
 
 Then open <http://127.0.0.1:8080>. Use `--port` to change the port.
 
-By default the server listens only on `127.0.0.1`, so only your own computer can use it. **It has no login.** If you pass `--bind 0.0.0.0` to use it from your phone, anyone on your network can control the soundbar. The server also rejects requests that lack a custom header, which stops other websites from driving it through your browser.
+### Use it from another device on your network
+
+By default the server listens only on `127.0.0.1`, so only your own computer can use it. To open the page from a phone, tablet or another computer on the same network:
+
+1. Find your computer's address on the network. On macOS Wi-Fi:
+
+   ```bash
+   ipconfig getifaddr en0
+   ```
+
+   On Linux, `hostname -I` lists addresses.
+
+2. Start the server bound to that address (use your own address in place of `192.168.1.20`):
+
+   ```bash
+   vizio-ctl --host 192.168.1.50 serve --bind 192.168.1.20
+   ```
+
+   Binding to your computer's address listens on that network interface only. `--bind 0.0.0.0` listens on every interface, which is broader.
+
+3. On the other device, open `http://192.168.1.20:8080`.
+
+Troubleshooting:
+
+- **Allow incoming connections** if your operating system's firewall asks the first time.
+- **Same network:** the other device must be on the same network as your computer, not a guest network. Some routers isolate Wi-Fi devices from each other ("AP isolation" or "client isolation"), which blocks this.
+- **The server must keep running** and the computer must stay awake.
+- **Address changes:** if your computer's address changes, the link stops working. A DHCP reservation for it in your router keeps it fixed.
+
+### Security
+
+**The web UI has no login.** While it is bound to your network, anyone on that network can open the page and control the soundbar. Only do this on a network you trust.
+
+- Do not forward the port on your router or expose it to the internet.
+- Stop the server (Ctrl+C) when you are done; running it again without `--bind` returns to computer-only access.
+- The server rejects requests that lack a custom header, which stops other websites from driving it through your browser. This does not protect against devices on your own network.
 
 ## How it works
 

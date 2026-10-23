@@ -53,6 +53,12 @@
   .actions button { padding: 12px 8px; font-size: 14px; font-weight: 500; }
   :disabled { opacity: .5; }
 
+  .presets { display: grid; gap: 12px; }
+  .preset { display: grid; gap: 6px; }
+  .preset-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+  .preset-row button.small { padding: 10px 14px; }
+  .preset-values { font-size: 12px; color: var(--muted); }
+
   dialog { border: 0; border-radius: 20px; padding: 0; width: min(440px, calc(100vw - 32px)); max-height: 85vh; background: var(--card); color: var(--text); box-shadow: 0 8px 40px rgba(0,0,0,.3); }
   dialog::backdrop { background: rgba(0,0,0,.45); }
   .dlg { padding: 24px; display: grid; gap: 16px; }
@@ -94,6 +100,11 @@
       </select>
     </label>
 
+    <details open>
+      <summary>Presets</summary>
+      <div id="presets" class="group presets" aria-busy="true"></div>
+    </details>
+
     <div id="groups" aria-busy="true"></div>
 
     <div id="msg" class="msg" role="status" aria-live="polite"></div>
@@ -125,6 +136,7 @@
     busy = on;
     staticButtons.forEach(b => b.disabled = on);
     actionButtons.forEach(b => b.disabled = on);
+    presetButtons.forEach(b => b.disabled = on);
     Object.values(controls).forEach(c => c.el.disabled = on);
   }
 
@@ -161,7 +173,13 @@
   async function run(path, method) {
     if (busy) return;
     setBusy(true);
-    try { show(await call(path, method)); }
+    try {
+      const data = await call(path, method);
+      show(data);
+      if (data.warnings && data.warnings.length) {
+        msg.textContent = 'Some settings could not be applied: ' + data.warnings.join('; ');
+      }
+    }
     catch (e) { showError(e.message); }
     finally { setBusy(false); }
   }
@@ -216,6 +234,37 @@
     groupsEl.removeAttribute('aria-busy');
   }
 
+  // ----- Presets -----
+  const presetsEl = $('presets');
+  const labels = {};   // setting name -> label, from the schema
+  const presetButtons = [];
+
+  function describe(values) {
+    return Object.entries(values).map(([k, v]) => (labels[k] || k) + ' ' + fmt(v)).join(' · ');
+  }
+
+  function renderPresets(list) {
+    presetsEl.textContent = '';
+    presetButtons.length = 0;
+    for (const p of list) {
+      const apply = el('button', { type: 'button', className: 'primary', textContent: p.label });
+      apply.addEventListener('click', () => run('/api/preset/' + p.name + '/apply', 'POST'));
+      const save = el('button', { type: 'button', className: 'small', textContent: 'Save current', title: 'Store the soundbar\'s current sound settings as ' + p.label });
+      save.addEventListener('click', async () => {
+        if (busy || !window.confirm('Replace the ' + p.label + ' preset with the soundbar\'s current sound settings?')) return;
+        setBusy(true);
+        try { renderPresets((await call('/api/preset/' + p.name + '/save', 'POST')).presets); }
+        catch (e) { showError(e.message); }
+        finally { setBusy(false); }
+      });
+      presetButtons.push(apply, save);
+      presetsEl.appendChild(el('div', { className: 'preset' },
+        el('div', { className: 'preset-row' }, apply, save),
+        el('div', { className: 'preset-values', textContent: describe(p.values) + (p.custom ? '' : ' (default)') })));
+    }
+    presetsEl.removeAttribute('aria-busy');
+  }
+
   staticButtons.forEach(b => b.addEventListener('click', () => {
     const name = b.dataset.act;
     run('/api/' + name + (name.startsWith('vol-') ? '?steps=' + steps.value : ''), 'POST');
@@ -257,7 +306,12 @@
   }
 
   (async () => {
-    try { buildControls((await call('/api/schema', 'GET')).settings); }
+    try {
+      const schema = (await call('/api/schema', 'GET')).settings;
+      schema.forEach(s => { labels[s.name] = s.label; });
+      buildControls(schema);
+    } catch (e) { showError(e.message); }
+    try { renderPresets((await call('/api/presets', 'GET')).presets); }
     catch (e) { showError(e.message); }
     refresh();
     setInterval(refresh, 10000);

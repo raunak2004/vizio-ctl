@@ -106,6 +106,15 @@ enum Cmd {
         #[arg(long)]
         reveal: bool,
     },
+    /// Apply a sound preset (music or movie), or save the current sound settings as one
+    #[command(after_help = "Presets: music, movie\n\nDefault values are built in. --save stores the soundbar's current\nsound settings as that preset, in your config folder.")]
+    Preset {
+        /// Preset name: music or movie
+        name: String,
+        /// Save the soundbar's current sound settings as this preset instead of applying it
+        #[arg(long)]
+        save: bool,
+    },
     /// Start a local web UI for controlling the soundbar
     Serve {
         /// Address to listen on (use 0.0.0.0 to allow other devices on your LAN)
@@ -511,6 +520,109 @@ fn print_info(c: &Client, cfg: &Config, reveal: bool) -> Result<()> {
     Ok(())
 }
 
+const PRESETS: [&str; 2] = ["music", "movie"];
+
+fn preset_label(name: &str) -> &'static str {
+    match name {
+        "music" => "Music",
+        "movie" => "Movie",
+        _ => "Preset",
+    }
+}
+
+// Starting values; saving the soundbar's current settings overrides them.
+fn default_preset(name: &str) -> Value {
+    match name {
+        "music" => json!({
+            "eq": "Music", "surround-sound": "Off", "vrt-x": "Off",
+            "bass": 1, "treble": 0, "center": 0, "surround-volume": 0, "subwoofer": 2
+        }),
+        "movie" => json!({
+            "eq": "Movie", "surround-sound": "On", "vrt-x": "On",
+            "bass": 2, "treble": -2, "center": 4, "surround-volume": 3, "subwoofer": 3
+        }),
+        _ => json!({}),
+    }
+}
+
+fn presets_path() -> Result<PathBuf> {
+    let dir = dirs::config_dir().context("no config dir")?.join("vizio-ctl");
+    fs::create_dir_all(&dir)?;
+    Ok(dir.join("presets.json"))
+}
+
+fn load_presets() -> serde_json::Map<String, Value> {
+    presets_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn check_preset(name: &str) -> Result<()> {
+    if !PRESETS.contains(&name) {
+        bail!("unknown preset '{name}'; valid: {}", PRESETS.join(", "));
+    }
+    Ok(())
+}
+
+fn presets_json() -> Value {
+    let saved = load_presets();
+    let list: Vec<Value> = PRESETS
+        .iter()
+        .map(|n| {
+            let values = saved.get(*n).cloned().unwrap_or_else(|| default_preset(n));
+            json!({"name": n, "label": preset_label(n), "values": values, "custom": saved.contains_key(*n)})
+        })
+        .collect();
+    json!({"ok": true, "presets": list})
+}
+
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn save_preset(c: &Client, cfg: &Config, name: &str) -> Result<()> {
+    check_preset(name)?;
+    let current = state(c, cfg)?["settings"].clone();
+    let mut values = serde_json::Map::new();
+    for s in SETTINGS.iter().filter(|s| s.group == "Sound") {
+        if let Some(v) = current.get(s.name) {
+            values.insert(s.name.into(), v.clone());
+        }
+    }
+    if values.is_empty() {
+        bail!("could not read the soundbar's current settings (is it on?)");
+    }
+    let mut all = load_presets();
+    all.insert(name.into(), Value::Object(values));
+    fs::write(presets_path()?, serde_json::to_string_pretty(&all)?)?;
+    Ok(())
+}
+
+/// Applies a preset and returns a description of any settings that could not be changed.
+fn apply_preset(c: &Client, cfg: &Config, name: &str) -> Result<Vec<String>> {
+    check_preset(name)?;
+    let saved = load_presets();
+    let values = saved.get(name).cloned().unwrap_or_else(|| default_preset(name));
+    let current = state(c, cfg)?["settings"].clone();
+    let mut failed = Vec::new();
+    for (key, want) in values.as_object().context("preset is not an object")? {
+        let raw = value_text(want);
+        if current.get(key).map(value_text).as_deref() == Some(raw.as_str()) {
+            continue; // already set
+        }
+        if let Err(e) = set_setting(c, cfg, key, &raw) {
+            failed.push(format!("{key}: {e}"));
+        }
+    }
+    Ok(failed)
+}
+
 fn url_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -577,6 +689,31 @@ fn handle_api(
             return match info(c, cfg, reveal) {
                 Ok(v) => json_response(200, v),
                 Err(e) => json_response(502, json!({"ok": false, "error": e.to_string()})),
+            };
+        }
+        (Method::Get, "/api/presets") => return json_response(200, presets_json()),
+        (Method::Post, p) if p.starts_with("/api/preset/") => {
+            let rest = &p["/api/preset/".len()..];
+            let Some((name, action)) = rest.split_once('/') else {
+                return json_response(404, json!({"ok": false, "error": "not found"}));
+            };
+            if check_preset(name).is_err() {
+                return json_response(404, json!({"ok": false, "error": "unknown preset"}));
+            }
+            return match action {
+                "apply" => match apply_preset(c, cfg, name).and_then(|failed| Ok((failed, state(c, cfg)?))) {
+                    Ok((failed, mut s)) => {
+                        s["ok"] = json!(true);
+                        s["warnings"] = json!(failed);
+                        json_response(200, s)
+                    }
+                    Err(e) => json_response(502, json!({"ok": false, "error": e.to_string()})),
+                },
+                "save" => match save_preset(c, cfg, name) {
+                    Ok(()) => json_response(200, presets_json()),
+                    Err(e) => json_response(502, json!({"ok": false, "error": e.to_string()})),
+                },
+                _ => json_response(404, json!({"ok": false, "error": "not found"})),
             };
         }
         (Method::Get, "/api/status") => Ok(()),
@@ -689,6 +826,21 @@ fn main() -> Result<()> {
         Cmd::Set { name, value } => setting_cmd(&c, &cfg, &name, value.as_deref())?,
         Cmd::Action { name } => run_action(&c, &cfg, &name)?,
         Cmd::Info { reveal } => print_info(&c, &cfg, reveal)?,
+        Cmd::Preset { name, save } => {
+            if save {
+                save_preset(&c, &cfg, &name)?;
+                println!("saved current sound settings as preset {name}");
+            } else {
+                let failed = apply_preset(&c, &cfg, &name)?;
+                for f in &failed {
+                    eprintln!("could not set {f}");
+                }
+                if !failed.is_empty() {
+                    bail!("{} setting(s) failed", failed.len());
+                }
+                println!("applied preset {name}");
+            }
+        }
         Cmd::Serve { bind, port } => serve(&c, &cfg, &bind, port)?,
     }
     Ok(())
